@@ -1,0 +1,21 @@
+# Secrets and local environment
+.env
+.env.*
+*.key
+*.pem
+secrets/
+service_role*
+supabase/.temp/
+
+# Local exports and data (never commit employee data)
+*.xlsx
+*.xls
+*.csv
+exports/
+data/
+
+# OS and editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
