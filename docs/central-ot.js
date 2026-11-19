@@ -1,0 +1,78 @@
+(()=>{
+'use strict';
+const $=id=>document.getElementById(id),db=()=>window.parent!==window?window.parent.AttendanceDB:null;
+const headers=['EmpCode','GID','Department','FirstName','FamilyName','TotalOT','2010/2000','2010/2001','2010/2002','0015/5016','0015/5019','0015/5000','0015/5022','TotalAllowance'];
+const fields=['ot15','ot20','ot30','meal','stand_by','emergency'];
+const dept=c=>({'TRW_TRD':'TRW/TRD','PSY_GRS':'PSY/GRS','PSD_PID':'PSD/PID'})[c]||c;
+const cents=v=>{const n=Number(v??0);if(!Number.isFinite(n)||n<0||!Number.isSafeInteger(Math.round(n*100)))throw Error('Invalid numeric amount');return Math.round(n*100);};
+const fmt=v=>(cents(v)/100).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+const sum=(r,fs)=>fs.reduce((n,f)=>n+cents(r[f]),0)/100;
+const month=(p,short=false)=>new Intl.DateTimeFormat('en-US',{month:short?'short':'long',year:short?'2-digit':'numeric',timeZone:'UTC'}).format(new Date(p+'-01T12:00:00Z')).replace(' ','-');
+const stamp=v=>v?new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Bangkok',day:'2-digit',month:'short',year:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(new Date(v)):'-';
+let summary=null,busy=false,run=0,draft=null,objectURL=null;
+function allowed(){return db()?.profile.role==='SUPER_ADMIN';}
+function context(){return {bridge:db(),period:$('central-month').value};}
+function same(c){return allowed()&&db()===c.bridge&&$('central-month').value===c.period;}
+function lock(v){busy=v;for(const id of ['central-month','central-reload','central-request','central-export'])$(id).disabled=v||(['central-request','central-export'].includes(id)&&(!summary||summary.period!==$('central-month').value));$('central-close').disabled=v;}
+function flatten(s){
+ const rows=[];for(const d of s.departments){for(const r of d.employees){const name=String(r.name||'').normalize('NFKC').trim().replace(/ +/g,' '),a=name.split(' ');const first=a.shift(),family=a.join(' ');const values=[r.gid,r.gid,dept(d.section_code),first,family];if(!r.gid||!first||values.some(v=>/[\t\r\n\x00-\x1f\x7f]/.test(String(v))))throw Error('GID/ชื่อ/แผนกมีอักขระที่ไม่รองรับ TXT');rows.push({...r,section:dept(d.section_code),first,family,total_ot:sum(r,fields.slice(0,3)),total_allowance:sum(r,fields.slice(3))});}}
+ const order=['RST_DWE','SIG','PSY'];return rows.sort((a,b)=>{const rank=x=>order.includes(x)?order.indexOf(x):99;return rank(a.section)-rank(b.section)||a.section.localeCompare(b.section);});
+}
+function txt(s){return headers.join('\t')+'\n'+flatten(s).map(r=>[r.gid,r.gid,r.section,r.first,r.family,fmt(r.total_ot),fmt(r.ot15),fmt(r.ot20),fmt(r.ot30),'0.00',fmt(r.meal),fmt(r.stand_by),fmt(r.emergency),fmt(r.total_allowance)].join('\t')).join('\n')+(flatten(s).length?'\n':'');}
+function render(s){const body=$('central-rows');body.replaceChildren();let approved=0;for(const d of s.departments){if(d.status==='Approved')approved++;const tr=document.createElement('tr');let cell=document.createElement('td'),strong=document.createElement('strong'),small=document.createElement('small');strong.textContent=dept(d.section_code);small.textContent='TA : '+(d.tas.map(t=>t.name).join(', ')||'-');cell.append(strong,small);tr.append(cell);cell=document.createElement('td');const badge=document.createElement('span');badge.className='central-state '+({'Approved':'approved','Requested':'requested','Needs reapproval':'reapproval'})[d.status];badge.textContent=d.status;small=document.createElement('small');small.textContent='Latest update: '+stamp(d.last_update);cell.append(badge,small);if(d.approved_name)cell.title='Manager: '+d.approved_name+' · '+stamp(d.approved_at);tr.append(cell);for(const [v,unit] of [[d.total_ot,' Hrs.'],[d.total_allowance,' THB']]){cell=document.createElement('td');strong=document.createElement('strong');strong.textContent=fmt(v)+unit;cell.append(strong);tr.append(cell);}body.append(tr);}const tr=document.createElement('tr');tr.className='grand';for(const v of ['Grand Total',approved+' / '+s.departments.length+' Approved',fmt(s.total_ot)+' Hrs.',fmt(s.total_allowance)+' THB']){const td=document.createElement('td');td.textContent=v;tr.append(td);}body.append(tr);$('central-status').textContent=s.period+' · '+approved+' / '+s.departments.length+' Approved · ตรวจล่าสุด '+stamp(new Date().toISOString())+' Bangkok';}
+async function reload(){if(!allowed()||busy)return;const c=context(),n=++run;summary=null;lock(true);$('central-status').textContent='กำลังตรวจสถานะและยอดทุกแผนก…';try{const s=await c.bridge.centralSummary(c.period);if(n!==run||!same(c))return;flatten(s);summary=s;render(s);}catch(e){if(n===run)$('central-status').textContent='โหลดไม่สำเร็จ: '+e.message+' · ตรวจ SQL13';}finally{if(n===run)lock(false);}}
+function appURL(){const u=new URL(window.parent.location.href);if(!['http:','https:'].includes(u.protocol))throw Error('Invalid application URL');u.search='';u.hash='';return u.href;}
+function mail(s){const body=['Dear Project Manager,','','Please approve OT&Allowance '+month(s.period,true)+' for MO CS ARL, as summarized below.','',...s.departments.map(d=>dept(d.section_code)+': '+d.status+' | OT '+fmt(d.total_ot)+' Hrs. | Allowance '+fmt(d.total_allowance)+' THB'),'','Total OT: '+fmt(s.total_ot)+' hours','Total Allowance: '+fmt(s.total_allowance)+' THB','','Please review the attached Time Sheet Summary Report.','','Attendance application',appURL(),'','Best regards,','Central Admin'].join('\r\n');const subject='[Request Approval] MO CS ARL OT&Allowance '+month(s.period,true);return {subject,body,href:'mailto:?subject='+encodeURIComponent(subject)+'&body='+encodeURIComponent(body)};}
+// Raster PDF built locally with embedded JPEG pages. No external library/server.
+async function pdf(s){
+ await document.fonts.load('12px CentralReport');await document.fonts.ready;
+ const all=flatten(s),pages=[],W=1605,H=1135,scale=1.5;
+ const cols=[24,140,224,394,604,694,784,874,964,1080,1196,1312,1430,1581];
+ const totals=fs=>all.reduce((n,r)=>n+fs.reduce((a,f)=>a+cents(r[f]),0),0)/100;
+ // Landscape rows; only identity fields wrap. Remarks are not printed.
+ const measure=document.createElement('canvas').getContext('2d');measure.font='12px Arial,CentralReport';const lineCount=(value,width)=>{let n=1,t='';for(const char of String(value||'')){if(char==='\n'||measure.measureText(t+char).width>width){n++;t=char==='\n'?'':char;}else t+=char;}return n;};
+ const chunks=[];let chunk=[],used=0;
+ for(const r of all){const lines=Math.max(lineCount(r.gid,108),lineCount(r.section,76),lineCount(r.first,162),lineCount(r.family,202));const h=Math.max(18,lines*14+4);if(h>850)throw Error('ชื่อยาวเกินพื้นที่หนึ่งหน้า PDF');if(used+h>850&&chunk.length){chunks.push(chunk);chunk=[];used=0;}chunk.push({r,h});used+=h;}if(chunk.length||!chunks.length)chunks.push(chunk);
+ for(let pi=0;pi<chunks.length;pi++){
+  const canvas=document.createElement('canvas');canvas.width=Math.round(W*scale);canvas.height=Math.round(H*scale);const c=canvas.getContext('2d');c.scale(scale,scale);c.fillStyle='white';c.fillRect(0,0,W,H);c.strokeStyle='#111';c.lineWidth=1;
+  const text=(t,x,y,size=12,bold=false,align='left',color='#111')=>{c.font=(bold?'bold ':'')+size+'px Arial,CentralReport';c.textAlign=align;c.fillStyle=color;c.fillText(String(t),x,y);};
+  const line=(x,y,x2,y2,w=1)=>{c.lineWidth=w;c.beginPath();c.moveTo(x,y);c.lineTo(x2,y2);c.stroke();};
+  const wrap=(value,x,y,width)=>{c.font='12px Arial,CentralReport';c.textAlign='left';c.fillStyle='#111';let current='',row=0;for(const char of String(value||'')){if(char==='\n'||c.measureText(current+char).width>width){c.fillText(current,x,y+row*14);row++;current=char==='\n'?'':char;}else current+=char;}c.fillText(current,x,y+row*14);return row+1;};
+  text('SIEMENS',24,51,29,true,'left','#008080');text('Time Sheet Summary Report  /  '+month(s.period),230,47,23,true);text('SMO CS ARL',1581,51,29,true,'right');line(24,60,1581,60,3);
+  const top=75;line(24,top,1581,top,2);line(24,126,1581,126,2);
+  const labels=[['Emp no.',28,95],['Dep.',182,95],['Firstname',228,95],['Lastname',398,95],['Meal',1022,94],['Allowance',1022,108],['Stand by',1138,94],['Allowance',1138,108],['Emergency',1254,94],['Allowance',1254,108],['Total',1371,94],['Allowance',1371,108],['Remark',1505,95]];
+  for(const [t,x,y] of labels)text(t,x,y,12,true,x===28||x===228||x===398?'left':'center');text('OT',784,94,12,true,'center');line(604,99,964,99);for(let j=4;j<8;j++){text(['Total','OT','OT','OT'][j-4],(cols[j]+cols[j+1])/2,113,12,false,'center');if(j>4)text(['','1.5','2.0','3.0'][j-4],(cols[j]+cols[j+1])/2,125,12,false,'center');}
+  let y=126;for(const {r,h} of chunks[pi]){const values=[r.gid,r.section,r.first,r.family,fmt(r.total_ot),fmt(r.ot15),fmt(r.ot20),fmt(r.ot30),fmt(r.meal),fmt(r.stand_by),fmt(r.emergency),fmt(r.total_allowance),''];for(let j=0;j<13;j++){if(j>=4&&j<=11){let size=12;while(size>6){c.font=size+'px Arial,CentralReport';if(c.measureText(values[j]).width<=cols[j+1]-cols[j]-8)break;size-=0.5;}text(values[j],cols[j+1]-4,y+14,size,false,'right');}else wrap(values[j],cols[j]+4,y+14,cols[j+1]-cols[j]-8);}y+=h;line(24,y,1581,y);}
+  if(pi===chunks.length-1){text('Total',596,y+15,12,true,'right');const vs=[totals(fields.slice(0,3)),totals(['ot15']),totals(['ot20']),totals(['ot30']),totals(['meal']),totals(['stand_by']),totals(['emergency']),totals(fields.slice(3))];for(let j=4;j<=11;j++){let size=12;while(size>6){c.font='bold '+size+'px Arial,CentralReport';if(c.measureText(fmt(vs[j-4])).width<=cols[j+1]-cols[j]-8)break;size-=0.5;}text(fmt(vs[j-4]),cols[j+1]-4,y+15,size,true,'right');}y+=20;line(24,y,1581,y,2);}
+  for(let j=0;j<cols.length;j++)line(cols[j],j>=5&&j<=7?99:75,cols[j],y,j===0||j===cols.length-1?2:1);
+  line(24,y,1581,y,2);const bottom=y+60;line(65,bottom-23,465,bottom-23);line(603,bottom-23,1003,bottom-23);line(1135,bottom-23,1535,bottom-23);text('Prepared by / Date',265,bottom-9,12,true,'center');text('Checked by / Date',803,bottom-9,12,true,'center');text('Approval Signature / Date',1335,bottom-9,12,true,'center');line(24,y,24,bottom,2);line(1581,y,1581,bottom,2);line(24,bottom,1581,bottom,2);
+  if(chunks.length>1)text('Page '+(pi+1)+' / '+chunks.length,1581,bottom+20,10,false,'right');
+  const bytes=Uint8Array.from(atob(canvas.toDataURL('image/jpeg',0.96).split(',')[1]),x=>x.charCodeAt(0));pages.push({bytes,width:canvas.width,height:canvas.height});
+ }
+ const enc=new TextEncoder(),parts=[],offsets=[0];let length=0;const push=b=>{const a=typeof b==='string'?enc.encode(b):b;parts.push(a);length+=a.length;};const object=(n,content)=>{offsets[n]=length;push(n+' 0 obj\n');push(content);push('\nendobj\n');};
+ push('%PDF-1.4\n');object(1,'<< /Type /Catalog /Pages 2 0 R >>');object(2,'<< /Type /Pages /Count '+pages.length+' /Kids ['+pages.map((_,i)=>(3+i*3)+' 0 R').join(' ')+'] >>');
+ pages.forEach((p,i)=>{const n=3+i*3,content='q 841.89 0 0 595.28 0 0 cm /Im0 Do Q';object(n,'<< /Type /Page /Parent 2 0 R /MediaBox [0 0 841.89 595.28] /Resources << /XObject << /Im0 '+(n+1)+' 0 R >> >> /Contents '+(n+2)+' 0 R >>');offsets[n+1]=length;push((n+1)+' 0 obj\n<< /Type /XObject /Subtype /Image /Width '+p.width+' /Height '+p.height+' /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length '+p.bytes.length+' >>\nstream\n');push(p.bytes);push('\nendstream\nendobj\n');object(n+2,'<< /Length '+content.length+' >>\nstream\n'+content+'\nendstream');});
+ const start=length;push('xref\n0 '+offsets.length+'\n0000000000 65535 f \n');for(let i=1;i<offsets.length;i++)push(String(offsets[i]).padStart(10,'0')+' 00000 n \n');push('trailer\n<< /Size '+offsets.length+' /Root 1 0 R >>\nstartxref\n'+start+'\n%%EOF\n');return new Blob(parts,{type:'application/pdf'});
+}
+function clearArtifact(){if(objectURL)URL.revokeObjectURL(objectURL);objectURL=null;$('central-pdf-preview').removeAttribute('src');for(const id of ['central-mail-content','central-pdf-preview','central-mail-open','central-copy','central-retry','central-print'])$(id).hidden=true;$('central-mail-open').removeAttribute('href');$('central-download').disabled=true;}
+async function prepare(){const d=draft;if(!d||busy||!same(d.context))return;lock(true);$('central-dialog-status').textContent='กำลังตรวจข้อมูลล่าสุดและเตรียมไฟล์…';$('central-retry').hidden=true;try{
+ if(!d.snapshot)d.snapshot=await d.context.bridge.centralSummary(d.context.period);
+ if(!same(d.context))throw Error('Session/month changed');
+ const m=d.action==='request_pm'?mail(d.snapshot):null;
+ // Validate/generate before durable event. No download or external launch before success.
+ const file=d.action==='request_pm'?await pdf(d.snapshot):new Blob([txt(d.snapshot)],{type:'text/plain;charset=utf-8'});
+ const ev=await d.context.bridge.centralAction(d.context.period,d.action,d.snapshot,d.id);
+ if(!same(d.context))throw Error('Session/month changed; check History');
+ summary=ev.summary;render(summary);objectURL=URL.createObjectURL(file);d.file=file;d.filename='Time Sheet Summary - '+d.context.period.slice(5)+d.context.period.slice(0,4)+(d.action==='request_pm'?'.pdf':'.txt');$('central-download').disabled=false;$('central-download').textContent=d.action==='request_pm'?'Download PDF Report':'Download Payroll TXT';
+ if(m){$('central-subject').value=m.subject;$('central-body').value=m.body;$('central-mail-content').hidden=false;$('central-copy').hidden=false;$('central-pdf-preview').src=objectURL;$('central-pdf-preview').hidden=false;if(m.href.length<=1800){$('central-mail-open').href=m.href;$('central-mail-open').hidden=false;}$('central-dialog-status').textContent='เตรียม PDF และบันทึก History แล้ว · ดาวน์โหลด PDF แล้วแนบเองใน Outlook'+(m.href.length>1800?' · เมลยาวเกิน mailto ให้ใช้ Copy แทน':' · ยังไม่ได้ส่งเมล');}
+ else $('central-dialog-status').textContent='เตรียม TXT และบันทึก History แล้ว · '+flatten(summary).length+' พนักงาน · กด Download เพื่อบันทึกไฟล์';
+ }catch(e){$('central-dialog-status').textContent='เตรียมไม่สำเร็จ: '+e.message+' · หากข้อมูลเปลี่ยน ให้ปิดแล้ว Refresh';$('central-retry').hidden=false;}finally{lock(false);}}
+function start(action){if(!allowed()||busy||!summary)return;clearArtifact();draft={context:context(),action,id:crypto.randomUUID(),snapshot:null};$('central-dialog-title').textContent=action==='request_pm'?'Request PM Approval + PDF':'Export Payroll TXT';$('central-dialog').showModal();prepare();}
+$('central-request').addEventListener('click',()=>start('request_pm'));$('central-export').addEventListener('click',()=>start('export_txt'));$('central-reload').addEventListener('click',reload);$('central-month').addEventListener('change',reload);$('central-retry').addEventListener('click',prepare);
+$('central-download').addEventListener('click',()=>{if(!draft?.file||!same(draft.context))return;const a=document.createElement('a');a.href=objectURL;a.download=draft.filename;document.body.append(a);a.click();a.remove();});
+$('central-copy').addEventListener('click',async()=>{try{await navigator.clipboard.writeText($('central-subject').value+'\r\n\r\n'+$('central-body').value);$('central-dialog-status').textContent='คัดลอกแล้ว · วางใน Outlook และแนบ PDF เอง';}catch{$('central-dialog-status').textContent='คัดลอกไม่ได้ · เลือกข้อความ Subject/Message และกด Ctrl+C';}});
+function close(){if(busy)return;clearArtifact();draft=null;$('central-dialog').close();} $('central-close').addEventListener('click',close);$('central-dialog').addEventListener('cancel',e=>{e.preventDefault();close();});$('central-mail-open').addEventListener('click',e=>{if(!draft||!same(draft.context))e.preventDefault();});
+window.CentralOT={open:reload};
+// Pure helpers exposed for reproducible format QA; no database writes.
+window.CentralOTFormat={txt,pdf,mail,flatten};
+})();
