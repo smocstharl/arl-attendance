@@ -178,6 +178,39 @@
     if(local.getUTCFullYear()!==year||local.getUTCMonth()!==month-1||local.getUTCDate()!==day)throw Error('วันที่ไม่มีในปฏิทิน');
     return new Date(local.getTime()-7*60*60*1000).toISOString();
   }
+  function arlTime(text) {
+    const m=/^(\d{2})\/(\d{2})\/(\d{4}) (\d{2}):(\d{2}):(\d{2})$/.exec(text);
+    if(!m)throw Error('ARL All Today ต้องใช้ DD/MM/YYYY HH:mm:ss แบบ 24 ชั่วโมง');
+    const [day,month,year,hour,minute,second]=m.slice(1).map(Number);
+    if(year<2020||year>2100||month<1||month>12||day<1||hour>23||minute>59||second>59)throw Error('วันเวลา ARL ไม่ถูกต้อง');
+    const local=new Date(Date.UTC(year,month-1,day,hour,minute,second));
+    if(local.getUTCFullYear()!==year||local.getUTCMonth()!==month-1||local.getUTCDate()!==day)throw Error('วันที่ ARL ไม่มีในปฏิทิน');
+    return new Date(local.getTime()-7*60*60*1000).toISOString();
+  }
+  function readArlRows(rows,context) {
+    const maxPunches=context.maxPunches===50000?50000:10000;
+    const allowed=new Set(context.gids||[]),punches=[],unmatched=[];
+    const stats={dataRows:0,skippedOtherGID:0,skippedOutsidePeriod:0,footerRows:0};
+    for(const [index,row] of rows.entries()){
+      const sourceRow=index+1;
+      if(row.length!==9||row[0]!=='S')throw Error('ARL All Today แถว '+sourceRow+': ต้องมี 9 คอลัมน์และรหัสรายการ S');
+      stats.dataRows++;
+      let time;try{time=arlTime(row[5]);}catch(e){throw Error('ARL All Today แถว '+sourceRow+': '+e.message);}
+      const gid=row[2].trim().toUpperCase();
+      if(gid&&(!/^[A-Z0-9][A-Z0-9._-]{0,63}$/.test(gid)||gid.startsWith('TESTEMP')||gid.startsWith('TEST_')))throw Error('ARL All Today แถว '+sourceRow+': GID ไม่ถูกต้อง');
+      if(context.keepAllGIDs!==true&&!allowed.has(gid)){stats.skippedOtherGID++;continue;}
+      if(time<context.fromUTC||time>=context.toUTC){stats.skippedOutsidePeriod++;continue;}
+      // Only GID and timestamp are mapped from the supplied ARL report.
+      // Other column meanings and ENTRY/EXIT direction are NOT inferred.
+      // Matching assigns in/out by shift windows as before.
+      const device='';
+      if(!gid&&context.keepAllGIDs===true)unmatched.push({time,device,sourceRow,event:'PUNCH',rawCells:[...row]});
+      else punches.push({gid,time,device});
+      if(punches.length+unmatched.length>maxPunches)throw Error('รองรับไม่เกิน '+maxPunches.toLocaleString('en-US')+' Punch ต่อไฟล์หลังกรอง');
+    }
+    if(!punches.length&&!unmatched.length)throw Error('ไม่พบ Punch ARL ที่นำเข้าได้ในช่วงเวลาที่เลือก');
+    return {year:context.year,month:context.month,punches,unmatched,sourceCounts:stats};
+  }
   async function read(file,context) {
     if(!file||!file.name.toLowerCase().endsWith('.txt')||file.size>10*1024*1024)throw Error('ใช้ไฟล์ .txt ไม่เกิน 10 MB');
     const bytes=new Uint8Array(await file.arrayBuffer());let encoding='utf-8';
@@ -187,7 +220,11 @@
       if(odd>sample.length/5)encoding='utf-16le';else if(even>sample.length/5)encoding='utf-16be';}
     const text=new TextDecoder(encoding,{fatal:true}).decode(bytes).replace(/^\uFEFF/,'');const rows=csv(text);
     const expected=['Division','Cardholder Name','Employee ID','Entry Clock','Entry Card','Entry Date/Time','Exit Clock','Exit Card','Exit Date/Time','Time Worked'];
-    if(!rows.length||rows[0].length!==10||rows[0].some((v,i)=>v!==expected[i]))throw Error('Header Time Clock ไม่ตรงไฟล์ที่ตรวจไว้');
+    const mrtaHeader=rows.length&&rows[0].length===10&&rows[0].every((v,i)=>v===expected[i]);
+    if(!mrtaHeader){
+      if(rows.length&&rows[0].length===9&&rows[0][0]==='S'&&/^\d{2}\/\d{2}\/\d{4} \d{2}:\d{2}:\d{2}$/.test(rows[0][5]))return readArlRows(rows,context);
+      throw Error('รูปแบบ All Today ไม่ตรง: ใช้ ARL 9 คอลัมน์ไม่มี Header หรือ MRTA 10 คอลัมน์พร้อม Header');
+    }
     const maxPunches=context.maxPunches===50000?50000:10000;const allowed=new Set(context.gids);const stats={dataRows:0,skippedOtherGID:0,skippedOutsidePeriod:0,footerRows:0};const punches=[],unmatched=[];
     for(const [index,row] of rows.slice(1).entries()){
       const sourceRow=index+2;
